@@ -1,0 +1,456 @@
+#include "EEPROM.h"
+#include <LiquidCrystal.h>
+
+//INISIALISASI PIN
+#define PIN_EN_SENSOR_L A0//DCBL 13, ICHBT A0
+#define PIN_EN_SENSOR_R 13
+//MAIN VERSI AMS
+/*
+#define button1 2
+#define button2 1
+#define button3 0
+*/
+
+//MAIN VERSI MP1584
+
+#define button1 12
+#define button2 1
+#define button3 0
+
+//SETTING BUTTON
+bool lastState1, lastState2, lastState3;
+int state1, state2, state3;
+byte step;
+
+//SETTING LCD
+const int rs = 11, en = 8, d4 = 2, d5 = 3, d6 = 4, d7 = 7;//SETTING MP1584
+//const int rs = 12, en = 11, d4 = 3, d5 = 4, d6 = 7, d7 = 8;//SETTING AMS117
+LiquidCrystal lcd(rs, en, d4, d5, d6, d7);
+
+//SETTING SENSOR
+struct changeSetting{
+  uint16_t threshold[14];
+  uint16_t whiteVal[14];//2 byte
+  uint16_t blackVal[14];//2 byte
+  byte rangeBlack = 40;//1 byte
+  byte rangeWhite = 40;
+  byte sensing = 30;//60 SENSOR AMS,37 SENSOR MP1584
+};
+
+
+int bitSens[14];
+int adcValue[14];//2byte
+byte posSensor[14] = {A1,A2,A3,A4,A5,A6,A7,A7,A6,A5,A4,A3,A2,A1};
+bool pin_switch = true;
+
+//Transistor time reading
+unsigned long switchStart = 0;
+unsigned long previousInterval; 
+unsigned long switchInterval = 1;
+
+
+//SETTING MOTOR AMS117
+#define MOTOR_L_FWD  6  //5
+#define MOTOR_L_BWD  5  //6
+#define MOTOR_R_FWD  10 //9
+#define MOTOR_R_BWD  9 //10
+
+//SETTING MOTOR AMS117
+/*
+#define MOTOR_L_BWD 5
+#define MOTOR_L_FWD 6
+#define MOTOR_R_FWD 9
+#define MOTOR_R_BWD 10
+*/
+uint8_t MaxSpeed = 255;
+uint8_t MinSpeed = 0;
+uint8_t CusSpeed = 80;
+
+//SETTING PID
+byte Kp = 5.5;
+byte Ki = 0;
+byte Kd = 0;
+byte PWM_MAX = 255;
+int PWM_MIN = 0;
+double error;
+
+//INDEX
+byte INDEX;
+int nilai;
+
+//SYARAT SENSOR
+#define PUTIH (bitSens[0] == 0 && bitSens[3] == 0 && bitSens[4] == 0 && bitSens[5] == 0 && bitSens[6] == 0 && bitSens[7] == 0 && bitSens[8] == 0 && bitSens[9] == 0 && bitSens[10] == 0 && bitSens[13] == 0)
+#define BACA_SEMUA_DEPAN (bitSens[5] == 1 && bitSens[6] == 1 && bitSens[7] == 1 && bitSens[8] == 1)
+#define BACA_T_KANAN (bitSens[6] == 1 && bitSens[7] == 1 && bitSens[8] == 1 && bitSens[9] == 1 && bitSens[10] == 1 && bitSens[11] == 1 && bitSens[12] == 0 && bitSens[13] == 0)
+//AKSES STRUCT
+changeSetting setting;
+
+void setup() {
+  pinMode(button1, INPUT_PULLUP);
+  //pinMode(button1, INPUT);
+  pinMode(button2, INPUT);
+  pinMode(button3, INPUT);
+  pinMode(MOTOR_L_BWD, OUTPUT);
+  pinMode(MOTOR_L_FWD, OUTPUT);
+  pinMode(MOTOR_R_FWD, OUTPUT);
+  pinMode(MOTOR_R_BWD, OUTPUT);
+  pinMode(PIN_EN_SENSOR_L, OUTPUT);
+  pinMode(PIN_EN_SENSOR_R, OUTPUT);
+  for (int x = 0; x < 14; x++) {
+      pinMode(posSensor[x], INPUT);
+    }
+  lcd.begin(16, 2);
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("    DECIBEL");
+  lcd.setCursor(0, 1);
+  lcd.print("  TOBRUT 1.0");
+  delay(3000);
+  digitalWrite(PIN_EN_SENSOR_L, LOW);
+  digitalWrite(PIN_EN_SENSOR_R, LOW);
+  lastState1 = digitalRead(button1);
+  lcd.clear();
+  //Serial.begin(115200);
+}
+
+void loop() {
+  robotRun();
+}
+
+int robotRun(){
+  while (1) {
+    if (digitalRead(button1) == LOW) {
+      delay(300);
+      calibrateSensorv2();
+    }
+    if (digitalRead(button3) == LOW) {
+      delay(300);
+      displaySens();
+    }
+    if(digitalRead(button2) == LOW){
+      while (digitalRead(button2) == LOW) {
+      }
+      delay(300);
+      break;
+    }
+    lcd.clear();
+  }
+  
+  int INDEX = 0;
+  int dataSensor;
+  while (1) {
+    lcd.setCursor(0, 0);
+    lcd.print(INDEX);
+    dataSensor = readSensor();
+    for (int i = 0; i < 14; i++) {
+      lcd.setCursor(i,1);
+      lcd.print(bitSens[i]);
+    }/*
+    if (BACA_SEMUA_DEPAN && INDEX == 0) {
+      INDEX = 1;
+    }
+    if(PUTIH && INDEX == 1){
+      while(PUTIH && INDEX == 1){
+        readSensor();
+        belokKanan();
+        if (bitSens[7] == 1 && bitSens[8] || bitSens[8] == 1 && bitSens[9] || bitSens[9] == 1 && bitSens[10] || bitSens[10] == 1 && bitSens[11] || bitSens[11] == 1 && bitSens[12]) {
+          INDEX = 2;
+          break;
+        }
+      }
+    } */
+    linefollow();
+    
+  }
+}
+
+
+int readV2(){
+     switchStart = micros();
+  //Kondisi switc98h kanan kiri transistor
+  if (switchStart - previousInterval > switchInterval){
+    if(pin_switch == true){
+    digitalWrite(PIN_EN_SENSOR_L, HIGH);
+    digitalWrite(PIN_EN_SENSOR_R, LOW);
+      for (int i = 0; i < 7; i++) {
+      adcValue[i] = analogRead(posSensor[i]);  
+      }
+    } 
+    else{
+      digitalWrite(PIN_EN_SENSOR_L, LOW);
+      digitalWrite(PIN_EN_SENSOR_R, HIGH);
+      for (int i = 0; i < 7; i++) {
+      adcValue[i + 7] = analogRead(posSensor[i + 7]);  
+      }
+    }
+    previousInterval = switchStart;
+    pin_switch = !pin_switch;
+  }
+  for(int i = 0; i < 14; i++){
+    if(adcValue[i] > setting.threshold[i]){
+      bitSens[i] = 1;
+    }
+    if(adcValue[i] <setting.threshold[i] ){
+      bitSens[i] = 0;
+    }
+  }
+}
+
+
+int readSensor() {
+    digitalWrite(PIN_EN_SENSOR_L, HIGH);
+    digitalWrite(PIN_EN_SENSOR_R, LOW);
+    delayMicroseconds(300);
+    for (int x = 0; x < 7; x++) {
+      adcValue[x] = analogRead(posSensor[x]);
+    }
+    delayMicroseconds(300);
+    digitalWrite(PIN_EN_SENSOR_L, LOW);
+    digitalWrite(PIN_EN_SENSOR_R, HIGH);
+    delayMicroseconds(300);
+    for (int x = 0; x < 7; x++) {
+      adcValue[x + 7] = analogRead(posSensor[x + 7]);
+    }
+    digitalWrite(PIN_EN_SENSOR_L, HIGH);
+    digitalWrite(PIN_EN_SENSOR_R, HIGH);
+
+    /*for(int i = 0; i < 14; i++){
+      if( (adcValue[i] < (setting.blackVal[i] + setting.rangeBlack)) && (adcValue[i] > (setting.blackVal[i] - setting.rangeBlack)) ){
+      bitSens[i] = 1;
+    }
+    if((adcValue[i] < (setting.whiteVal[i] + setting.rangeWhite)) && (adcValue[i] > (setting.whiteVal[i] - setting.rangeWhite))){
+      bitSens[i] = 0;
+    }
+    }*/
+    for(int i = 0; i < 14; i++){
+      if(adcValue[i] > setting.threshold[i]){
+      bitSens[i] = 1;
+    }
+    if(adcValue[i] <setting.threshold[i] ){
+      bitSens[i] = 0;
+    }
+    }
+
+  
+}
+void displaySens(){
+  while (1) {
+   int dataSensor = readSensor();
+  for (int i = 0; i < 14; i++) {
+  lcd.setCursor(i,1);
+  lcd.print(bitSens[i]);
+  }
+  if(digitalRead(button3) == LOW){
+    delay(300);
+    break;
+    }
+  }
+  lcd.clear();
+  lcd.setCursor(0, 1);
+  lcd.print("OKE");
+  delay(300);
+}
+
+void calibrateSensor() {
+    lcd.clear();
+    lcd.setCursor(0, 1);
+    lcd.print("SCANNING");
+    const int jumlahSensor = 14;
+     for (int i = 0; i < jumlahSensor; i++) {
+            setting.whiteVal[i] = 1023;
+            setting.blackVal[i] = 0;
+          }
+    while(1){
+    int buffSens = readSensor();
+    for (int i = 0; i < jumlahSensor; i++) {
+      if (adcValue[i] > setting.blackVal[i] ) 
+      {
+        setting.blackVal[i] = adcValue[i];
+        EEPROM.put(i,setting.blackVal[i]);
+      }
+      if(adcValue[i] < setting.whiteVal[i])
+      {
+        setting.whiteVal[i] = adcValue[i];
+        EEPROM.put(i+14,setting.whiteVal[i]);
+      }
+    }
+    if (digitalRead(button1) == LOW) {
+    lcd.clear();
+    lcd.setCursor(0, 1);
+    lcd.print("DONE");
+    delay(300);
+    break;
+    }
+    }
+  
+  }
+void linefollow(){
+  double P = 0;
+  //double I = 0;
+  double D = 0;
+  double error = 0;
+  double lastError = 0;
+  unsigned long lastProcess = 0;
+  //
+  double deltaTime = (millis() - lastProcess) / 1000.0;
+  lastProcess = millis();
+  //SETTING ERROR
+  if (bitSens[6] == 1) error = -1;                      // 00000010000000
+  if (bitSens[5] == 1 && bitSens[6] == 1) error = -2;   // 00000110000000
+  if (bitSens[5] == 1) error = -3;                      // 00000100000000
+  if (bitSens[4] == 1 && bitSens[5] == 1) error = -4;   // 00001100000000
+  if (bitSens[4] == 1) error = -5;                      // 00001000000000
+  if (bitSens[3] == 1 && bitSens[4] == 1) error = -6;   // 00011000000000
+  if (bitSens[3] == 1) error = -7;                      // 00010000000000
+  if (bitSens[2] == 1 && bitSens[3] == 1) error = -8;   // 00110000000000
+  if (bitSens[2] == 1) error = -9;                      // 00100000000000
+  if (bitSens[1] == 1 && bitSens[2] == 1) error = -10;  // 01100000000000
+  if (bitSens[1] == 1) error = -11;                     // 01000000000000
+  if (bitSens[0] == 1 && bitSens[1] == 1) error = -12;  // 11000000000000
+  if (bitSens[0] == 1) error = -13;                     // 10000000000000
+
+  if (bitSens[6] == 1 && bitSens[7] == 1) error = 0;    // 00000011000000
+
+  if (bitSens[7] == 1) error = 1;                       // 00000001000000
+  if (bitSens[7] == 1 && bitSens[8] == 1) error = 2;    // 00000001100000
+  if (bitSens[8]) error = 3;                            // 00000000100000
+  if (bitSens[8] == 1 && bitSens[9] == 1) error = 4;    // 00000000110000
+  if (bitSens[9] == 1) error = 5;                       // 00000000010000
+  if (bitSens[9] == 1 && bitSens[10] == 1) error = 6;   // 00000000011000
+  if (bitSens[10] == 1) error = 7;                      // 00000000001000
+  if (bitSens[10] == 1 && bitSens[11] == 1) error = 8;  // 00000000001100
+  if (bitSens[11] == 1) error = 9;                      // 00000000000100
+  if (bitSens[11] == 1 && bitSens[12] == 1) error = 10; // 00000000000110
+  if (bitSens[12] == 1) error = 11;                     // 00000000000010
+  if (bitSens[12] == 1 && bitSens[13] == 1) error = 12;
+   if (bitSens[13] == 1) error = 13;
+
+  //SETUP PID
+  P = error * (double) Kp;
+  //I = 
+  D = (error - lastError) * (double) Kd / deltaTime;
+  lastError = error;
+
+  int moveVal = (int)P + (int)D;
+  int moveLeft = CusSpeed + moveVal;
+  int moveRight = CusSpeed - moveVal;
+  if(moveLeft > PWM_MAX) moveLeft = PWM_MAX;
+  if(moveLeft < PWM_MIN) moveLeft = PWM_MIN;
+  if(moveRight > PWM_MAX) moveRight = PWM_MAX;
+  if(moveRight < PWM_MIN) moveRight = PWM_MIN;
+  motorSetting(moveLeft, moveRight);
+  
+}
+
+void motorSetting(int LL,int RR){
+  analogWrite(MOTOR_L_FWD, LL);
+  analogWrite(MOTOR_R_FWD, RR);
+  analogWrite(MOTOR_L_BWD, 0);
+  analogWrite(MOTOR_R_BWD, 0);
+}
+
+void berhenti() {
+  analogWrite(MOTOR_L_BWD, 0);
+  analogWrite(MOTOR_L_FWD, 0);
+  analogWrite(MOTOR_R_FWD, 0);
+  analogWrite(MOTOR_R_BWD, 0);
+}
+
+void maju() {
+  analogWrite(MOTOR_L_BWD, 0);
+  analogWrite(MOTOR_L_FWD, 100);
+  analogWrite(MOTOR_R_FWD, 100);
+  analogWrite(MOTOR_R_BWD, 0);
+}
+
+void mundur() {
+  analogWrite(MOTOR_L_BWD, 255);
+  analogWrite(MOTOR_L_FWD, 0);
+  analogWrite(MOTOR_R_FWD, 0);
+  analogWrite(MOTOR_R_BWD, 255);
+}
+
+//belok kiri
+void belokKiri(){
+  analogWrite(MOTOR_L_BWD, 255);
+  analogWrite(MOTOR_L_FWD, 0);
+  analogWrite(MOTOR_R_FWD,255);
+  analogWrite(MOTOR_R_BWD, 0);
+}
+
+void putarKiri() {
+  analogWrite(MOTOR_L_BWD, 0);
+  analogWrite(MOTOR_L_FWD, 255);
+  analogWrite(MOTOR_R_FWD, 0);
+  analogWrite(MOTOR_R_BWD, 255);
+}
+
+//belok kanan
+void putarKanan() {
+  analogWrite(MOTOR_L_BWD, 255);
+  analogWrite(MOTOR_L_FWD, 0);
+  analogWrite(MOTOR_R_FWD, 0);
+  analogWrite(MOTOR_R_BWD, 255);
+}
+
+void belokKanan(){
+  analogWrite(MOTOR_L_BWD, 0);
+  analogWrite(MOTOR_L_FWD, 255);
+  analogWrite(MOTOR_R_FWD, 0);
+  analogWrite(MOTOR_R_BWD, 80);
+}
+
+void calibrateSensorv2(){
+ lcd.clear();
+    lcd.setCursor(0, 1);
+    lcd.print("SCANNING");
+    const int jumlahSensor = 14;
+     for (int i = 0; i < jumlahSensor; i++) {
+            setting.whiteVal[i] = 1023;
+            setting.blackVal[i] = 0;
+          }
+    while(1){
+    int buffSens = readSensor();
+    for (int i = 0; i < jumlahSensor; i++) {
+      if (adcValue[i] > setting.blackVal[i] ) 
+      {
+        setting.blackVal[i] = adcValue[i];
+      }
+      if(adcValue[i] < setting.whiteVal[i])
+      {
+        setting.whiteVal[i] = adcValue[i];
+      }
+    }
+    if (digitalRead(button1) == LOW) {
+    delay(300);
+    break;
+    }
+    }
+    for (int i = 0; i < jumlahSensor; i++) {
+            setting.threshold[i] = ((setting.blackVal[i] -setting.whiteVal[i]) * (float)((100.0 - setting.sensing) / 100.0)) + setting.whiteVal[i];
+          }
+    lcd.clear();
+    lcd.setCursor(0, 1);
+    lcd.print("DONE");
+    delay(300);
+    for (int i = 0; i < jumlahSensor; i++) {
+      EEPROM.put(i, setting.threshold[i]);
+    }
+}
+
+
+
+
+
+/*if(BACA_SEMUA_DEPAN && INDEX == 0){
+      INDEX++;
+      delay(100);
+      do {
+        readSensor();
+        belokKanan();
+        if(bitSens[5] == 1 || bitSens[6] == 1 || bitSens[7] == 1 || bitSens[8] == 1){
+          delay(200);
+          break;
+        }
+      }while ((bitSens[0] == 0 || bitSens[13] == 0) && INDEX == 1);
+    }*/
